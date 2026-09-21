@@ -1,0 +1,7 @@
+sample_scripts/.venv/
+sample_scripts/__pycache__/
+**/.ipynb_checkpoints/
+results/*.nc
+results/*.csv
+*.log
+data/camera.RData
