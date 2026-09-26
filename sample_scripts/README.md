@@ -160,3 +160,73 @@ camera 側 r_hat=1.005/ess_bulk=314、persearch 側 r_hat=1.022/ess_bulk=154 ま
 `../results/predictive_check_{direction}_summary.csv` に保存される。tau を範囲指定して
 最適値を探す場合は `--tau-scan START STOP STEP` を使う
 （結果は `../results/predictive_check_{direction}_tauscan.csv` に保存される）。
+
+## 別の調査に適用する場合
+
+`conjoint_lib`のロジック自体は camera 調査（ブランド4水準・2値属性5つ・価格）の属性構成に
+決め打ちされておらず、`conjoint_lib.study.StudyConfig` を差し替えるだけで、属性数・水準数・
+連続属性の有無が違う別の選択型コンジョイント調査（PerSearchのLong形式シート）にも
+適用できる。camera調査自体は `conjoint_lib.schema.CAMERA_STUDY` として定義されており、
+これが各関数の既定値になっている。
+
+新しい調査を定義するには、`StudyConfig`・`Attribute`・`Level`（`conjoint_lib/study.py`）を
+使って属性構成を書く。
+
+```python
+from conjoint_lib.study import Attribute, Level, StudyConfig
+
+MY_STUDY = StudyConfig(
+    attributes=(
+        # 3水準以上のカテゴリ属性: 全水準に raw_column を与えるとフルダミー符号化になる
+        # （camera調査のブランドと同じ扱い。基準水準を置かない）
+        Attribute(
+            name="color", ja_column="カラー",
+            levels=(
+                Level(label="black", ja_labels=("黒",), raw_column="color_black"),
+                Level(label="white", ja_labels=("白",), raw_column="color_white"),
+                Level(label="red", ja_labels=("赤",), raw_column="color_red"),
+            ),
+        ),
+        # 2水準のカテゴリ属性: 先頭を基準水準(raw_columnなし)にすると1列の0/1ダミーになる
+        Attribute(
+            name="warranty", ja_column="保証",
+            levels=(
+                Level(label="1年保証", ja_labels=("1年",)),
+                Level(label="3年保証", ja_labels=("3年",), raw_column="warranty_3y"),
+            ),
+        ),
+        # 連続属性: parser で文字列を数値に変換する（価格以外にも使える）
+        Attribute(
+            name="capacity", ja_column="容量",
+            continuous_column="capacity_gb",
+            parser=lambda s: float(s),
+        ),
+    ),
+    # カウンティング法のグルーピング（省略するとカテゴリ属性すべてを1グループにする）
+    attribute_groups={"all": ("color", "warranty")},
+)
+```
+
+あとは `conjoint_lib.prepare`/`counting`/`hb`/`predictive` の各関数に `config=MY_STUDY` を渡す。
+
+```python
+from conjoint_lib.prepare import run_prepare_persearch
+from conjoint_lib.counting import run_counting_for_dataset
+from conjoint_lib.hb import run_hb
+
+run_prepare_persearch(xlsx_path=..., out_dir=..., config=MY_STUDY)
+run_counting_for_dataset(long_csv=..., label="my_study", config=MY_STUDY)
+run_hb("my_study", config=MY_STUDY, ...)  # feature_names・属性重要度の算出方法もMY_STUDYから決まる
+```
+
+**このまま使えない・注意が必要な点:**
+
+- `sample_scripts/conjoint_lib/paths.py` の結果ファイル名（`counting_camera_*`・
+  `hb_diag_{camera,persearch}_*` 等）は camera/persearch という2データセット比較の命名を
+  決め打ちしている。別の調査を同じ `results/` に混在させる場合は、`paths.py` を参考に
+  別の命名のヘルパーを足すか、`out_dir`/`in_dir` を調査ごとに分ける。
+- `StudyConfig.price_attribute()`（カウンティング法・属性重要度で価格として扱う連続属性）は
+  現状1つまでしか対応していない。連続属性を複数使う調査では明示的に `ValueError` になる。
+- camera実データの取り込み（`prepare.load_camera_rdata`/`build_camera_long_df`）は
+  `bayesm::camera` の物理レイアウト固有の処理で、`StudyConfig` を渡しても切り替わらない
+  （他の調査では実データ側もPerSearchのLong形式シートから作る前提）。

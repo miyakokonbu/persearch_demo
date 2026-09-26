@@ -1,9 +1,14 @@
 """階層ベイズMNL（対角共分散、PyMC）。
 
-camera の生の符号化のまま（brand 4列ダミー・pixels/zoom/video/swivel/wifi の0/1・
-price を100ドル単位の連続値、「どれも選ばない」は全列0の行）、対角共分散の階層構造
+raw符号化された long DataFrame（brand 4列ダミー・2値属性の0/1・price を連続値、
+「どれも選ばない」は全列0の行、といった符号化）に、対角共分散の階層構造
 `beta_i ~ Normal(beta_bar, diag(sigma^2))` を適用する。非中心化パラメータ化
 （`z ~ Normal(0,1)` を `sigma_beta` と組み合わせる）で収束を安定させる。
+
+`build_design`/`fit_hb_diag`/`summarize` は raw符号化の列名（`feature_names`）を
+引数で受け取るだけで属性の意味を知らないため、そのままどの調査にも使える。
+`importance_from_summary`だけは属性重要度の算出方法（フルダミー/基準水準コード/連続値）
+を知る必要があるため `study.StudyConfig` を受け取る。
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ import pytensor.tensor as pt
 from . import schema
 from .paths import RESULTS_DIR, hb_importance_csv, hb_meta_json, hb_summary_csv, hb_trace_nc
 from .prepare import load_raw_long
+from .study import StudyConfig
 
 DEFAULT_PRIORS = {"beta_bar_scale": 5.0, "sigma_beta_scale": 2.5}
 DEFAULT_SEED = 42
@@ -36,7 +42,7 @@ class DesignData:
     option_labels: list[str]
 
 
-def build_design(df: pd.DataFrame, feature_names: list[str] = schema.RAW_COLUMNS) -> DesignData:
+def build_design(df: pd.DataFrame, feature_names: list[str] = schema.CAMERA_STUDY.raw_columns()) -> DesignData:
     """long DataFrame から (n_resp, n_task, n_alt, K) の設計配列を作る。
 
     camera・persearch とも n_alt=5（A〜D + none）。データセット間で水準数が違っても
@@ -79,7 +85,7 @@ def fit_hb_diag(
     X: np.ndarray,
     choice_idx: np.ndarray,
     *,
-    feature_names: list[str] = schema.RAW_COLUMNS,
+    feature_names: list[str] = schema.CAMERA_STUDY.raw_columns(),
     beta_bar_scale: float = DEFAULT_PRIORS["beta_bar_scale"],
     sigma_beta_scale: float = DEFAULT_PRIORS["sigma_beta_scale"],
     draws: int = 1000,
@@ -121,7 +127,7 @@ def _extract_param_names(index: pd.Index) -> list[str]:
     return names
 
 
-def summarize(idata: az.InferenceData, feature_names: list[str] = schema.RAW_COLUMNS) -> pd.DataFrame:
+def summarize(idata: az.InferenceData, feature_names: list[str] = schema.CAMERA_STUDY.raw_columns()) -> pd.DataFrame:
     """beta_bar・sigma_beta の事後要約を feature_names の順で返す。
 
     旧実装は `az.summary()` の行順が coords 順と一致する前提で `param` 列を位置で
@@ -144,21 +150,43 @@ def summarize(idata: az.InferenceData, feature_names: list[str] = schema.RAW_COL
     return bb.merge(sb, on="param", suffixes=("_beta_bar", "_sigma_beta"))
 
 
-def importance_from_summary(summary: pd.DataFrame, price_range: float) -> pd.DataFrame:
+def continuous_ranges(df: pd.DataFrame, config: StudyConfig = schema.CAMERA_STUDY) -> dict[str, float]:
+    """連続属性ごとの値の範囲（max-min）。`importance_from_summary`のスケーリングに使う。"""
+    ranges: dict[str, float] = {}
+    for attr in config.continuous_attributes():
+        vals = df.loc[df["is_none"] == 0, attr.continuous_column]
+        ranges[attr.continuous_column] = float(vals.max() - vals.min())
+    return ranges
+
+
+def importance_from_summary(
+    summary: pd.DataFrame,
+    ranges: dict[str, float],
+    config: StudyConfig = schema.CAMERA_STUDY,
+) -> pd.DataFrame:
+    """属性重要度（beta_bar から算出）。
+
+    カテゴリ属性がフルダミー符号化（水準数ぶんの列、brandのような）なら列間の
+    最大値-最小値、基準水準コード（1列のみ、2値属性のような）ならその係数の絶対値、
+    連続属性（price のような）なら係数の絶対値×値の範囲、を重要度の素点とする。
+    水準数・属性数が調査によって変わっても同じ計算式でよいのは、raw_columns() が
+    1個の属性は「絶対値」、複数個の属性は「レンジ」という2パターンしかないため。
+    """
     coefs = dict(zip(summary["param"], summary["mean_beta_bar"]))
-    raw_importance = {
-        "brand": max(coefs[b] for b in schema.BRANDS) - min(coefs[b] for b in schema.BRANDS),
-        **{attr: abs(coefs[attr]) for attr in schema.BINARY_ATTRS},
-        "price_usd100": abs(coefs["price_usd100"]) * price_range,
-    }
+    raw_importance: dict[str, float] = {}
+    for attr in config.attributes:
+        cols = attr.raw_columns()
+        if attr.is_continuous:
+            raw_importance[attr.name] = abs(coefs[cols[0]]) * ranges.get(cols[0], 1.0)
+        elif len(cols) == 1:
+            raw_importance[attr.name] = abs(coefs[cols[0]])
+        else:
+            vals = [coefs[c] for c in cols]
+            raw_importance[attr.name] = max(vals) - min(vals)
+
     total = sum(raw_importance.values())
     imp = pd.Series(raw_importance) / total
     return imp.sort_values(ascending=False).rename("importance").reset_index().rename(columns={"index": "attr"})
-
-
-def price_range(df: pd.DataFrame) -> float:
-    price_vals = df.loc[df["is_none"] == 0, "price_usd100"]
-    return float(price_vals.max() - price_vals.min())
 
 
 def convergence_headline(summary: pd.DataFrame) -> dict[str, float]:
@@ -208,6 +236,7 @@ def run_hb(
     save_trace: bool = True,
     save_importance: bool = True,
     progressbar: bool = True,
+    config: StudyConfig = schema.CAMERA_STUDY,
 ) -> dict[str, Path]:
     """notebook（hb_diag.ipynb）とCLI（prior_sensitivity.py）が共有する実行本体。
 
@@ -225,20 +254,22 @@ def run_hb(
         )
 
     out_dir = Path(out_dir) if out_dir is not None else RESULTS_DIR
-    df = load_raw_long(label, in_dir)
+    df = load_raw_long(label, in_dir, config=config)
     if n_resp_limit is not None:
         keep_ids = sorted(df["respondent_id"].unique())[:n_resp_limit]
         df = df[df["respondent_id"].isin(keep_ids)]
 
-    p_range = price_range(df)
+    ranges = continuous_ranges(df, config)
+    feature_names = config.raw_columns()
 
     t0 = time.time()
-    design = build_design(df)
+    design = build_design(df, feature_names)
     print(f"[{label}] design matrix: X.shape={design.X.shape}, build={time.time() - t0:.1f}s")
 
     t0 = time.time()
     idata = fit_hb_diag(
         design.X, design.choice_idx,
+        feature_names=feature_names,
         beta_bar_scale=beta_bar_scale, sigma_beta_scale=sigma_beta_scale,
         draws=draws, tune=tune, chains=chains, target_accept=target_accept,
         seed=seed, progressbar=progressbar,
@@ -246,7 +277,7 @@ def run_hb(
     elapsed = time.time() - t0
     print(f"[{label}] sampling done in {elapsed:.1f}s")
 
-    summary = summarize(idata, schema.RAW_COLUMNS)
+    summary = summarize(idata, feature_names)
     summary["elapsed_sec"] = elapsed
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -262,7 +293,7 @@ def run_hb(
     written["summary"] = summary_path
 
     if save_importance:
-        imp = importance_from_summary(summary, p_range)
+        imp = importance_from_summary(summary, ranges, config)
         imp_path = hb_importance_csv(label, out_dir, tag)
         imp.to_csv(imp_path, index=False, encoding="utf-8-sig")
         written["importance"] = imp_path

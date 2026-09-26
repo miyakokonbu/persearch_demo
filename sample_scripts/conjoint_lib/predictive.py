@@ -17,12 +17,13 @@ from . import schema
 from .hb import build_design
 from .paths import RESULTS_DIR, hb_summary_csv, predictive_summary_csv, predictive_tauscan_csv
 from .prepare import load_raw_long
+from .study import StudyConfig
 
 # direction（予測対象データセット） -> hb_diag側のラベル
 HB_LABEL = {"real": "camera", "pseudo": "persearch"}
 
 
-def load_beta_bar(summary_csv: Path, feature_names: list[str] = schema.RAW_COLUMNS) -> np.ndarray:
+def load_beta_bar(summary_csv: Path, feature_names: list[str] = schema.CAMERA_STUDY.raw_columns()) -> np.ndarray:
     if not summary_csv.exists():
         raise FileNotFoundError(f"{summary_csv} が見つかりません。hb_diag.ipynb を先に実行してください。")
     summary = pd.read_csv(summary_csv, encoding="utf-8-sig")
@@ -58,10 +59,10 @@ def _require_direction(direction: str) -> str:
     return "pseudo" if direction == "real" else "real"
 
 
-def _load_design(direction: str, in_dir: Path | None):
+def _load_design(direction: str, in_dir: Path | None, config: StudyConfig):
     label = HB_LABEL[direction]
-    df = load_raw_long(label, in_dir)
-    return build_design(df)
+    df = load_raw_long(label, in_dir, config=config)
+    return build_design(df, config.raw_columns())
 
 
 def run_predictive_check(
@@ -70,14 +71,15 @@ def run_predictive_check(
     in_dir: Path | None = None,
     out_dir: Path | None = None,
     tau: float = 1.0,
+    config: StudyConfig = schema.CAMERA_STUDY,
 ) -> pd.DataFrame:
     other = _require_direction(direction)
     in_dir = Path(in_dir) if in_dir is not None else RESULTS_DIR
     out_dir = Path(out_dir) if out_dir is not None else RESULTS_DIR
 
-    design = _load_design(direction, in_dir)
-    beta_oracle = load_beta_bar(hb_summary_csv(HB_LABEL[direction], in_dir))
-    beta_cross = load_beta_bar(hb_summary_csv(HB_LABEL[other], in_dir))
+    design = _load_design(direction, in_dir, config)
+    beta_oracle = load_beta_bar(hb_summary_csv(HB_LABEL[direction], in_dir), config.raw_columns())
+    beta_cross = load_beta_bar(hb_summary_csv(HB_LABEL[other], in_dir), config.raw_columns())
 
     n_alt = design.X.shape[2]
     uniform_ll = float(np.log(1.0 / n_alt))
@@ -126,6 +128,7 @@ def run_tau_scan(
     *,
     in_dir: Path | None = None,
     out_dir: Path | None = None,
+    config: StudyConfig = schema.CAMERA_STUDY,
 ) -> pd.DataFrame:
     if step <= 0:
         raise ValueError("step must be > 0")
@@ -136,8 +139,8 @@ def run_tau_scan(
     in_dir = Path(in_dir) if in_dir is not None else RESULTS_DIR
     out_dir = Path(out_dir) if out_dir is not None else RESULTS_DIR
 
-    design = _load_design(direction, in_dir)
-    beta_cross = load_beta_bar(hb_summary_csv(HB_LABEL[other], in_dir))
+    design = _load_design(direction, in_dir, config)
+    beta_cross = load_beta_bar(hb_summary_csv(HB_LABEL[other], in_dir), config.raw_columns())
 
     taus = np.arange(start, stop + step / 2, step)
     rows = []

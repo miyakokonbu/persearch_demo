@@ -1,44 +1,23 @@
-"""属性・水準・ラベル対応など、パイプライン全体で共有する定数。ロジックは持たない。"""
+"""camera調査固有の設定と、調査に依存しないプラットフォーム定数。
+
+属性・水準・raw符号化列といった調査固有の構成は`CAMERA_STUDY`（`study.StudyConfig`の
+インスタンス）にまとめてある。別の調査に対応するには、この`CAMERA_STUDY`と同じ形で
+新しい`StudyConfig`を作り、`conjoint_lib.prepare`/`counting`/`hb`/`predictive`の各関数に
+`config=`として渡す（詳細は README.md）。
+"""
 from __future__ import annotations
 
-BRANDS = ["canon", "sony", "nikon", "panasonic"]
-BINARY_ATTRS = ["pixels", "zoom", "video", "swivel", "wifi"]
-RAW_COLUMNS = BRANDS + BINARY_ATTRS + ["price_usd100"]
+import re
+
+import pandas as pd
+
+from .study import Attribute, Level, StudyConfig
 
 LONG_KEY_COLS = ["respondent_id", "task_index", "option_label", "is_none", "chosen"]
 
-# 属性 -> (基準水準, 上位水準) のカテゴリ文字列
-BINARY_LEVELS: dict[str, tuple[str, str]] = {
-    "pixels": ("低画素", "高画素"),
-    "zoom": ("標準ズーム", "高倍率ズーム"),
-    "video": ("動画機能なし", "動画機能あり"),
-    "swivel": ("回転式液晶なし", "回転式液晶あり"),
-    "wifi": ("Wi-Fiなし", "Wi-Fiあり"),
-}
-
-ATTRIBUTE_LEVEL_ORDER: dict[str, list[str]] = {
-    "brand": BRANDS,
-    **{attr: list(levels) for attr, levels in BINARY_LEVELS.items()},
-}
-
-# カウンティング法(counting.py)で使う属性グループ
-MAIN_ATTRS = ["brand", "pixels", "zoom", "wifi"]
-# 全属性モデル。camera・persearch のどちらも video/swivel を持つため両方で生成される。
-FULL_ATTRS = ["brand", "pixels", "zoom", "video", "swivel", "wifi"]
-
-# --- camera (実データ) ---
-CAMERA_N_RESP = 332
-CAMERA_N_TASKS = 16
-CAMERA_N_ALTS = 5  # A/B/C/D + none
-OPTION_LABELS = ["A", "B", "C", "D"]  # none は別扱い
-
-# --- PerSearch (疑似データ) の日本語ラベル対応 ---
-PERSEARCH_SHEET_NAME = "回答データ（Long形式）"
-PERSEARCH_PRICE_COL = "価格"
-PERSEARCH_BRAND_COL = "ブランド"
-
-# PerSearch側の出力列名(構造列) -> このパッケージ内部での列名(LONG_KEY_COLS に揃える)。
-# 属性列(ブランド・画素数等)は日本語のまま扱うためここには含めない。
+# PerSearchの出力列名(構造列) -> このパッケージ内部での列名(LONG_KEY_COLS に揃える)。
+# 属性列(ブランド・画素数等)の列名・水準ラベルは調査ごとに変わるため CAMERA_STUDY 側で持つ。
+# こちらはPerSearchのExport形式（プラットフォーム側の仕様）なので調査によらず共通と想定する。
 PERSEARCH_COLUMN_RENAME = {
     "UUID": "uuid",
     "課題番号": "task_index",
@@ -47,42 +26,93 @@ PERSEARCH_COLUMN_RENAME = {
     "選択された": "chosen",
 }
 
-PERSEARCH_BRAND_MAP = {"キヤノン": "canon", "ソニー": "sony", "ニコン": "nikon", "パナソニック": "panasonic"}
+# --- camera (実データ、bayesm::camera) の取り込み固有の定数 ---
+# bayesm::camera の取り込み(load_camera_rdata/build_camera_long_df)はこのデータセット
+# 固有の物理レイアウト（Xの列順など）に依存しており、他の調査では使わないため
+# StudyConfigには含めていない。
+CAMERA_N_RESP = 332
+CAMERA_N_TASKS = 16
+CAMERA_N_ALTS = 5  # A/B/C/D + none
+OPTION_LABELS = ["A", "B", "C", "D"]  # none は別扱い
 
-# 属性の日本語列名 -> raw 0/1 列名(英語)
-PERSEARCH_ATTR_COLS = {
-    "画素数": "pixels",
-    "ズーム": "zoom",
-    "動画撮影": "video",
-    "可動式モニタ": "swivel",
-    "Wi-Fi": "wifi",
-}
-
-# 属性の日本語列名 -> {日本語水準: 0/1}
-PERSEARCH_BINARY_MAPS: dict[str, dict[str, int]] = {
-    "画素数": {"標準画素数": 0, "高画素数": 1},
-    "ズーム": {"標準ズーム": 0, "高倍率ズーム": 1},
-    "動画撮影": {"動画非対応": 0, "動画対応": 1},
-    "可動式モニタ": {"可動式モニタなし": 0, "可動式モニタあり": 1},
-    "Wi-Fi": {"Wi-Fi非対応": 0, "Wi-Fi対応": 1},
-}
+_PRICE_RE = re.compile(r"[\d,]+(?:\.\d+)?")
 
 
-def _derive_persearch_label_maps() -> dict[str, dict[str, str]]:
-    # PERSEARCH_BINARY_MAPS (0/1) と BINARY_LEVELS (基準/上位のカテゴリ文字列) から導出する。
-    # 手書きの対応表をもう一つ持つと、PerSearch側の表記が変わったときに片方だけ更新されて
-    # 2つの出力(raw / labeled)が無言でズレる恐れがあるため、常にこちらから計算する。
-    out: dict[str, dict[str, str]] = {}
-    for ja_col, en_col in PERSEARCH_ATTR_COLS.items():
-        ref, treat = BINARY_LEVELS[en_col]
-        out[ja_col] = {
-            ja_level: (treat if value == 1 else ref)
-            for ja_level, value in PERSEARCH_BINARY_MAPS[ja_col].items()
-        }
-    return out
+def parse_price_usd100(raw: object) -> float:
+    """`"$129"`のような表記を100ドル単位の連続値(1.29)に変換する。パースできない値は例外にする。"""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        raise ValueError("price is missing")
+    m = _PRICE_RE.search(str(raw).replace(",", ""))
+    if not m:
+        raise ValueError(f"price could not be parsed: {raw!r}")
+    return float(m.group(0)) / 100.0
 
 
-# 属性の日本語列名 -> {日本語水準: camera_long.csv と同じカテゴリ文字列}
-PERSEARCH_LABEL_MAPS: dict[str, dict[str, str]] = _derive_persearch_label_maps()
-
-EXPECTED_PRICES_USD100 = (0.79, 1.29, 1.79, 2.29, 2.79)
+# --- camera調査の属性構成 ---
+# 属性の宣言順が raw符号化(feature_names)・labeled long CSV の列順になる。
+CAMERA_STUDY = StudyConfig(
+    attributes=(
+        Attribute(
+            name="brand",
+            ja_column="ブランド",
+            levels=(
+                Level(label="canon", ja_labels=("キヤノン",), raw_column="canon"),
+                Level(label="sony", ja_labels=("ソニー",), raw_column="sony"),
+                Level(label="nikon", ja_labels=("ニコン",), raw_column="nikon"),
+                Level(label="panasonic", ja_labels=("パナソニック",), raw_column="panasonic"),
+            ),
+        ),
+        Attribute(
+            name="pixels",
+            ja_column="画素数",
+            levels=(
+                Level(label="低画素", ja_labels=("標準画素数",)),
+                Level(label="高画素", ja_labels=("高画素数",), raw_column="pixels"),
+            ),
+        ),
+        Attribute(
+            name="zoom",
+            ja_column="ズーム",
+            levels=(
+                Level(label="標準ズーム", ja_labels=("標準ズーム",)),
+                Level(label="高倍率ズーム", ja_labels=("高倍率ズーム",), raw_column="zoom"),
+            ),
+        ),
+        Attribute(
+            name="video",
+            ja_column="動画撮影",
+            levels=(
+                Level(label="動画機能なし", ja_labels=("動画非対応",)),
+                Level(label="動画機能あり", ja_labels=("動画対応",), raw_column="video"),
+            ),
+        ),
+        Attribute(
+            name="swivel",
+            ja_column="可動式モニタ",
+            levels=(
+                Level(label="回転式液晶なし", ja_labels=("可動式モニタなし",)),
+                Level(label="回転式液晶あり", ja_labels=("可動式モニタあり",), raw_column="swivel"),
+            ),
+        ),
+        Attribute(
+            name="wifi",
+            ja_column="Wi-Fi",
+            levels=(
+                Level(label="Wi-Fiなし", ja_labels=("Wi-Fi非対応",)),
+                Level(label="Wi-Fiあり", ja_labels=("Wi-Fi対応",), raw_column="wifi"),
+            ),
+        ),
+        Attribute(
+            name="price",
+            ja_column="価格",
+            continuous_column="price_usd100",
+            parser=parse_price_usd100,
+            expected_values=(0.79, 1.29, 1.79, 2.29, 2.79),
+        ),
+    ),
+    persearch_sheet_name="回答データ（Long形式）",
+    attribute_groups={
+        "main5": ("brand", "pixels", "zoom", "wifi"),  # 5属性モデル(価格込み)。persearchの疑似データと直接比較する主分析
+        "full": ("brand", "pixels", "zoom", "video", "swivel", "wifi"),  # 全属性モデル。頑健性チェック用
+    },
+)
