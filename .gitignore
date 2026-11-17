@@ -6,3 +6,5 @@ results/*.nc
 results/*.csv
 *.log
 data/camera.RData
+results/*.json
+results_*/

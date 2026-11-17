@@ -28,6 +28,15 @@ persearch_demo/
 |---|---|
 | `camera.RData` | 実データ。R の `bayesm` パッケージ収録の `camera` データセット。ライセンス上の理由でリポジトリには同梱せず `.gitignore` で除外している。取得手順は後述 |
 | `persearch_camera.xlsx` | 疑似データ。PerSearch で `camera` と同じ7属性・価格5水準（$79〜$279）の調査を作成・実行した結果。camera と同数の332体のペルソナが32課題に回答している（サンプルとして同梱済み） |
+| `persearch_camera_finance.xlsx` | 疑似データ（金融版ペルソナ）。上と**同じ調査設計（刺激・人数・対象者の絞り込みが同一）で、ペルソナのデータセットだけ金融版（`nvidia/Nemotron-Personas-Finance-Japan`）に差し替えて**実行した結果。続編記事用 |
+
+### 出典・ライセンス（疑似データのペルソナ）
+
+疑似データの年齢・職業・趣味などの属性は、NVIDIA が公開した合成ペルソナデータセットに由来する
+（CC BY 4.0）。
+
+- `persearch_camera.xlsx`: [nvidia/Nemotron-Personas-Japan](https://huggingface.co/datasets/nvidia/Nemotron-Personas-Japan)
+- `persearch_camera_finance.xlsx`: [nvidia/Nemotron-Personas-Finance-Japan](https://huggingface.co/datasets/nvidia/Nemotron-Personas-Finance-Japan)
 
 ## 出力データ（results/）
 
@@ -67,6 +76,25 @@ pip install -r requirements.txt jupyter ipykernel
 ```
 
 依存バージョンは `sample_scripts/requirements.txt` に動作確認済みの値を固定してある。
+
+## 金融版ペルソナの疑似データで再実行する（続編用）
+
+`persearch_camera_finance.xlsx` は、既存の `results/` を上書きしないよう、**出力先を `results_finance/` に分けて**実行する
+（分析コードは変更不要。`--in-dir` / `--out-dir` で切り替える）。`sample_scripts/` で実行する。
+
+```
+mkdir -p ../results_finance
+python regen_persearch_long.py --xlsx ../data/persearch_camera_finance.xlsx --out-dir ../results_finance
+python run_counting.py --in-dir ../results_finance --out-dir ../results_finance
+python run_hb.py persearch --in-dir ../results_finance --out-dir ../results_finance_hb4 \
+    --chains 4 --draws 2000 --tune 2000 --no-progressbar
+```
+
+- 金融版は個人間のばらつきが大きく、記事と同じ設定（`--chains 2 --draws 1000`）では価格まわりの収束が
+  弱い（最大 r_hat 1.030、最小 ess_bulk 74）ことがあるため、上記では chains=4・draws=2000 としている
+- 実データ（`camera.RData`）の準備は下の「分析コードの動かし方」と同じ
+- `pymc`/`pytensor` は C コンパイルに `Python.h` が必要。システムの Python に開発用ヘッダが無い場合は、
+  `uv venv --python 3.12 --managed-python .venv` のように `uv` 管理の Python を使うとよい
 
 ## 分析コードの動かし方
 
